@@ -17,6 +17,9 @@ IGNORE_KEYWORDS = ["사기 공문", "사칭문자", "수요물자"]
 BOT_BASE_URL = "https://www.g2b.go.kr/link/PNPE027_01/single/?bidPbancNo={}&bidPbancOrd={}"
 PUBLIC_BASE_URL = "https://www.g2b.go.kr:8081/ep/invitation/publish/bidInfoDtl.do?bidno={}&bidseq={}"
 
+# Limit concurrent page visits to 2 so G2B doesn't choke or block requests
+CONCURRENCY_LIMIT = asyncio.Semaphore(2)
+
 # --- STATE MANAGEMENT ---
 def load_scraped_history() -> set:
     if os.path.exists(HISTORY_FILE):
@@ -41,101 +44,104 @@ def parse_bid_info(raw_bid_no: str):
 
 # --- SCRAPING LOGIC ---
 async def process_opportunity(context, item, index, total, history_set):
-    bid_no = item["bid_id"]
-    title = item["title"]
-    
-    folder_name = sanitize_folder_name(f"[{bid_no}] {title}")
-    opportunity_dir = os.path.join(BASE_DIR, folder_name)
-    os.makedirs(opportunity_dir, exist_ok=True)
-    
-    print(f"\n[Task {index}/{total}] Processing {bid_no} in background...")
-    
-    base_no, ord_no = parse_bid_info(bid_no)
-    bot_url = BOT_BASE_URL.format(base_no, ord_no)
-    public_url = PUBLIC_BASE_URL.format(base_no, ord_no)
-    
-    item["url"] = public_url 
-    page = await context.new_page()
-    page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
-    
-    try:
-        await page.goto(bot_url, wait_until='networkidle')
-        await page.wait_for_timeout(6000) 
+    async with CONCURRENCY_LIMIT:
+        bid_no = item["bid_id"]
+        title = item["title"]
         
-        # 1. Extract Description
+        folder_name = sanitize_folder_name(f"[{bid_no}] {title}")
+        opportunity_dir = os.path.join(BASE_DIR, folder_name)
+        os.makedirs(opportunity_dir, exist_ok=True)
+        
+        print(f"\n[Task {index}/{total}] Processing {bid_no}...")
+        
+        base_no, ord_no = parse_bid_info(bid_no)
+        bot_url = BOT_BASE_URL.format(base_no, ord_no)
+        public_url = PUBLIC_BASE_URL.format(base_no, ord_no)
+        
+        item["url"] = public_url 
+        page = await context.new_page()
+        page.on("dialog", lambda dialog: asyncio.create_task(dialog.accept()))
+        
         try:
-            detail_html = await page.content()
-            detail_soup = BeautifulSoup(detail_html, "html.parser")
-            for script in detail_soup(["script", "style"]):
-                script.extract()
-            item["raw_text_description"] = detail_soup.get_text(separator="\n", strip=True)
-        except Exception as e:
-            item["raw_text_description"] = f"Extraction failed: {str(e)}"
+            # Use 'domcontentloaded' with fallback delay instead of strict 'networkidle'
+            await page.goto(bot_url, wait_until='domcontentloaded', timeout=45000)
+            await page.wait_for_timeout(5000) 
             
-        # 2. Extract Attachments
-        print(f"    [Task {index}] Hunting for files...")
-        downloaded_files = set()
-        
-        text_elements = await page.locator(f"text=/\.({'|'.join([ext.strip('.') for ext in TARGET_EXTENSIONS])})$/i").all()
-        link_elements = await page.locator("a, button, span[onclick*='download']").all()
-        all_elements = text_elements + link_elements
-        
-        for elem in all_elements:
+            # 1. Extract Description
             try:
-                if not await elem.is_visible():
-                    continue
-                    
-                text = (await elem.inner_text()).strip()
-                if not text or text in downloaded_files:
-                    continue
-                    
-                is_file = any(ext in text.lower() for ext in TARGET_EXTENSIONS) or "download" in (await elem.get_attribute("onclick") or "").lower()
+                detail_html = await page.content()
+                detail_soup = BeautifulSoup(detail_html, "html.parser")
+                for script in detail_soup(["script", "style"]):
+                    script.extract()
+                item["raw_text_description"] = detail_soup.get_text(separator="\n", strip=True)
+            except Exception as e:
+                item["raw_text_description"] = f"Extraction failed: {str(e)}"
                 
-                if is_file and not any(k in text for k in IGNORE_KEYWORDS):
-                    try:
-                        async with page.expect_download(timeout=8000) as download_info:
-                            await elem.evaluate("""node => {
-                                node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                                node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                                node.click();
-                            }""")
-                        
-                        download = await download_info.value
-                        actual_filename = download.suggested_filename
-                        
-                        if not actual_filename:
-                            actual_filename = text if any(ext in text.lower() for ext in TARGET_EXTENSIONS) else f"attachment_{len(downloaded_files)}.file"
-                        
-                        final_save_path = os.path.join(opportunity_dir, actual_filename)
-                        await download.save_as(final_save_path)
-                        
-                        item["attachments"].append({"file_name": actual_filename, "url": public_url})
-                        downloaded_files.add(text)
-                        print(f"    [Task {index}] [+] Downloaded: {actual_filename}")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-                
-        # Only add to history if we successfully processed the page without crashing
-        history_set.add(bid_no)
-        
-    except Exception as e:
-        print(f"    [Task {index}] [!] Critical error processing {bid_no}: {e}")
-    finally:
-        json_path = os.path.join(opportunity_dir, "metadata.json")
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(item, f, ensure_ascii=False, indent=2)
+            # 2. Extract Attachments
+            print(f"    [Task {index}] Hunting for files...")
+            downloaded_files = set()
             
-        await page.close()
+            # Escaped backslash fix for Python string formatting regex
+            ext_pattern = "|".join([ext.strip('.') for ext in TARGET_EXTENSIONS])
+            selector_query = f"text=/\\.({ext_pattern})$/i"
+            
+            text_elements = await page.locator(selector_query).all()
+            link_elements = await page.locator("a, button, span[onclick*='download']").all()
+            all_elements = text_elements + link_elements
+            
+            for elem in all_elements:
+                try:
+                    if not await elem.is_visible():
+                        continue
+                        
+                    text = (await elem.inner_text()).strip()
+                    if not text or text in downloaded_files:
+                        continue
+                        
+                    is_file = any(ext in text.lower() for ext in TARGET_EXTENSIONS) or "download" in (await elem.get_attribute("onclick") or "").lower()
+                    
+                    if is_file and not any(k in text for k in IGNORE_KEYWORDS):
+                        try:
+                            async with page.expect_download(timeout=10000) as download_info:
+                                await elem.evaluate("""node => {
+                                    node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                                    node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                                    node.click();
+                                }""")
+                            
+                            download = await download_info.value
+                            actual_filename = download.suggested_filename
+                            
+                            if not actual_filename:
+                                actual_filename = text if any(ext in text.lower() for ext in TARGET_EXTENSIONS) else f"attachment_{len(downloaded_files)}.file"
+                            
+                            final_save_path = os.path.join(opportunity_dir, actual_filename)
+                            await download.save_as(final_save_path)
+                            
+                            item["attachments"].append({"file_name": actual_filename, "url": public_url})
+                            downloaded_files.add(text)
+                            print(f"    [Task {index}] [+] Downloaded: {actual_filename}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                    
+            history_set.add(bid_no)
+            
+        except Exception as e:
+            print(f"    [Task {index}] [!] Error processing {bid_no}: {e}")
+        finally:
+            json_path = os.path.join(opportunity_dir, "metadata.json")
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(item, f, ensure_ascii=False, indent=2)
+                
+            await page.close()
 
 
 async def scrape_g2b_spa_full(keyword: str, headless: bool):
     os.makedirs(BASE_DIR, exist_ok=True)
     scraped_history = load_scraped_history()
     
-    # Get today's date formatted to match G2B (usually YYYY/MM/DD)
-    # Using local time based on context: August 13, 2026
     target_date_str = datetime.now().strftime("%Y/%m/%d")
     print(f"[*] Starting daily run for date: {target_date_str} with keyword: '{keyword}'")
     
@@ -150,7 +156,7 @@ async def scrape_g2b_spa_full(keyword: str, headless: bool):
         main_page = await context.new_page()
         
         print('[*] Navigating to G2B main portal...')
-        await main_page.goto('https://www.g2b.go.kr/', wait_until='networkidle')
+        await main_page.goto('https://www.g2b.go.kr/', wait_until='domcontentloaded')
         await main_page.wait_for_timeout(4000)
         await main_page.keyboard.press("Escape")
         
@@ -162,7 +168,7 @@ async def scrape_g2b_spa_full(keyword: str, headless: bool):
         ''')
         
         print('[*] Waiting for search results to load...')
-        await main_page.wait_for_timeout(10000)
+        await main_page.wait_for_timeout(8000)
         
         title_locators = await main_page.locator("label[id$='_bizNm']").all()
         bid_nos = await main_page.locator("label[id$='_bizNo']").all()
@@ -172,18 +178,14 @@ async def scrape_g2b_spa_full(keyword: str, headless: bool):
         opportunities = []
         for i in range(len(title_locators)):
             date_text = (await dates[i].inner_text()).strip() if i < len(dates) else ""
-            
-            # Extract just the YYYY/MM/DD part in case it includes times like "2026/08/13 10:41"
             item_date = date_text[:10]
             
-            # Stop queuing if we've hit results older than our target date
             if item_date != target_date_str:
                 print(f"[-] Reached older date ({item_date}). Stopping queue.")
                 break
                 
             bid_no = (await bid_nos[i].inner_text()).strip() if i < len(bid_nos) else f"UNKNOWN_{i}"
             
-            # Check history to prevent duplicate work
             if bid_no in scraped_history:
                 print(f"[-] Skipping {bid_no} - Already scraped previously.")
                 continue
@@ -206,7 +208,7 @@ async def scrape_g2b_spa_full(keyword: str, headless: bool):
         if not opportunities:
             print("[*] No new opportunities found for today. Exiting.")
         else:
-            print(f"\n[*] Found {len(opportunities)} NEW results for {target_date_str}. Dispatching workers...")
+            print(f"\n[*] Found {len(opportunities)} NEW results for {target_date_str}. Dispatching workers (max 2 at a time)...")
             tasks = [
                 process_opportunity(context, item, idx + 1, len(opportunities), scraped_history) 
                 for idx, item in enumerate(opportunities)

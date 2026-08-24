@@ -45,7 +45,7 @@ def scrape_iris_opportunity(driver, base_download_dir):
         print("[*] Checking detail page structure...")
         time.sleep(3)
         
-        # Switch into iframe if the content resides in one
+        # Switch into iframe if content resides inside one
         iframes = driver.find_elements(By.TAG_NAME, "iframe")
         for iframe in iframes:
             try:
@@ -64,20 +64,15 @@ def scrape_iris_opportunity(driver, base_download_dir):
         
         print("[*] Extracting target metadata from main content area...")
         
-        # Scrape strictly within content areas to ignore site headers ("IRIS 소개")
         metadata_script = """
             var data = {};
-            
-            // Isolate main content container
             var container = document.querySelector('#contents, .contents, .sub_contents, .sub_content, main, form') || document.body;
             
-            // Extract page heading strictly from content area
             var titleEl = container.querySelector('h2, h3, .board_view_title, .view_tit, .tit');
             if (titleEl && !titleEl.innerText.includes("IRIS 소개")) {
                 data['공고명 (Title)'] = titleEl.innerText.trim();
             }
 
-            // Target all table rows in the content area
             var rows = container.querySelectorAll('tr');
             rows.forEach(function(row) {
                 var ths = row.querySelectorAll('th');
@@ -106,24 +101,22 @@ def scrape_iris_opportunity(driver, base_download_dir):
             print("[!] Warning: JavaScript extractor found no structured data. Falling back to page source parse.")
             opportunity_data["raw_text"] = driver.find_element(By.TAG_NAME, "body").text[:2000]
 
-        # Dynamic Folder Creation: Extract Announcement Number, Title, or Fallback ID
+        # Dynamic Folder Creation
         folder_identifier = opportunity_data.get("공고번호") or opportunity_data.get("공고명 (Title)") or f"IRIS_Opp_{int(time.time())}"
         clean_folder_name = "".join([c for c in folder_identifier if c.isalnum() or c in (' ', '_', '-')]).rstrip().replace(" ", "_")
         
-        # Create folder DIRECTLY inside the IRIS directory
-        specific_opp_dir = os.path.join(base_download_dir, clean_folder_name)
+        specific_opp_dir = os.path.join(base_download_dir, clean_folder_name[:60])
         
         if not os.path.exists(specific_opp_dir):
             os.makedirs(specific_opp_dir)
             print(f"[*] Created opportunity folder: {specific_opp_dir}")
             
-        # Hot-swap Chrome's download path to the specific opportunity folder
         driver.execute_cdp_cmd('Page.setDownloadBehavior', {
             'behavior': 'allow',
             'downloadPath': specific_opp_dir
         })
 
-        # Save metadata.json inside the specific opportunity folder
+        # Save metadata.json
         json_filename = os.path.join(specific_opp_dir, "metadata.json")
         with open(json_filename, 'w', encoding='utf-8') as f:
             json.dump(opportunity_data, f, ensure_ascii=False, indent=4)
@@ -141,7 +134,7 @@ def scrape_iris_opportunity(driver, base_download_dir):
         for link in file_links:
             file_name = link.text.strip()
             if file_name and len(file_name) > 3:
-                attachments.append(file_name)
+                attachments.append({"file_name": file_name})
                 print(f"    -> Downloading: {file_name}")
                 driver.execute_script("arguments[0].click();", link)
                 time.sleep(1.5) 
@@ -151,10 +144,36 @@ def scrape_iris_opportunity(driver, base_download_dir):
     except Exception as e:
         print(f"[!] Error during scraping: {e}")
 
+def prepare_main_page(driver):
+    """Utility to navigate to IRIS main page and clear popups/frames."""
+    driver.get("https://iris.go.kr/main.do")
+    time.sleep(3) 
+    
+    driver.execute_script("""
+        var elements = document.querySelectorAll('[class*="pop"], [id*="pop"], .layer, .modal');
+        for (var i = 0; i < elements.length; i++) {
+            elements[i].style.display = 'none';
+        }
+    """)
+    
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    for iframe in iframes:
+        try:
+            driver.switch_to.frame(iframe)
+            if "접수중" in driver.page_source:
+                print("[*] Target data found inside an iframe! Switched context.")
+                break
+            driver.switch_to.default_content()
+        except:
+            driver.switch_to.default_content()
+            
+    driver.execute_script("window.scrollTo(0, 800);")
+    time.sleep(2)
+
 # --- Execution Block ---
 if __name__ == "__main__":
-    # Directly targeting the IRIS folder (Removing the extra 'downloads' subfolder)
-    BASE_DOWNLOAD_DIR = "/Users/olfajerbi/Desktop/R&D opportunties AI Engine/IRIS"
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BASE_DOWNLOAD_DIR = os.path.join(PROJECT_ROOT, "IRIS")
     
     if not os.path.exists(BASE_DOWNLOAD_DIR):
         os.makedirs(BASE_DOWNLOAD_DIR)
@@ -164,98 +183,92 @@ if __name__ == "__main__":
     
     try:
         print("[*] Navigating to IRIS main dashboard...")
-        driver.get("https://iris.go.kr/main.do")
-        time.sleep(4) 
-        
-        print("[*] Clearing popups...")
-        driver.execute_script("""
-            var elements = document.querySelectorAll('[class*="pop"], [id*="pop"], .layer, .modal');
-            for (var i = 0; i < elements.length; i++) {
-                elements[i].style.display = 'none';
-            }
-        """)
-        
-        print("[*] Checking for embedded iframes...")
-        iframes = driver.find_elements(By.TAG_NAME, "iframe")
-        for iframe in iframes:
-            try:
-                driver.switch_to.frame(iframe)
-                if "접수중" in driver.page_source:
-                    print("[*] Target data found inside an iframe! Switched context.")
-                    break
-                driver.switch_to.default_content()
-            except:
-                driver.switch_to.default_content()
-                
-        driver.execute_script("window.scrollTo(0, 800);")
-        time.sleep(3) 
-
+        prepare_main_page(driver)
         original_window = driver.current_window_handle
 
-        print("[*] Executing tag-agnostic JavaScript clicker...")
-        click_result = driver.execute_script("""
+        # Count total '접수중' badges on the main page
+        total_badges = driver.execute_script("""
             var xpath = "//*[normalize-space(text())='접수중']";
             var elements = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-            
-            if (elements.snapshotLength === 0) return 'NO_ACCEPTING_BADGES_FOUND';
-            
-            for (var i = 0; i < elements.snapshotLength; i++) {
-                var badge = elements.snapshotItem(i);
-                var row = badge.closest('tr, li');
-                
-                if (!row) {
-                    row = badge.parentElement;
-                    while (row && row.tagName !== 'BODY') {
-                        if (row.querySelectorAll('a').length > 0) break;
-                        row = row.parentElement;
-                    }
-                }
-                
-                if (row) {
-                    var links = row.querySelectorAll('a');
-                    for (var j = 0; j < links.length; j++) {
-                        if (links[j].innerText.trim().length > 10) {
-                            links[j].click();
-                            return 'CLICKED_A_TAG';
-                        }
-                    }
-                    if (row.hasAttribute('onclick')) {
-                        row.click();
-                        return 'CLICKED_ROW_ITSELF';
-                    }
-                }
-            }
-            return 'FOUND_BADGE_BUT_NO_CLICKABLE_LINK';
+            return elements.snapshotLength;
         """)
 
-        print(f"[*] JS Click Result: {click_result}")
+        print(f"[*] Total '접수중' badges found on dashboard: {total_badges}")
 
-        if click_result not in ['CLICKED_A_TAG', 'CLICKED_ROW_ITSELF']:
-            raise Exception(f"JavaScript could not locate the target. Reason: {click_result}")
-
-        print("[*] Click executed successfully! Waiting for navigation...")
-
-        time.sleep(4) 
-        if len(driver.window_handles) > 1:
-            print("[*] New tab detected! Switching context to the new tab...")
-            for window_handle in driver.window_handles:
-                if window_handle != original_window:
-                    driver.switch_to.window(window_handle)
-                    break
-        else:
-            driver.switch_to.default_content()
-
-        print("[*] Waiting for detail page to render...")
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
-        )
-        time.sleep(3) 
+        if total_badges == 0:
+            print("[!] No '접수중' badges located.")
         
-        scrape_iris_opportunity(driver, BASE_DOWNLOAD_DIR)
+        # Loop through each opportunity badge
+        for item_index in range(total_badges):
+            print(f"\n--- Processing Opportunity {item_index + 1} of {total_badges} ---")
+            
+            # Reset context back to main page for iterations after the first
+            if item_index > 0:
+                # Close any extra detail tabs if open
+                while len(driver.window_handles) > 1:
+                    driver.switch_to.window(driver.window_handles[-1])
+                    driver.close()
+                driver.switch_to.window(original_window)
+                prepare_main_page(driver)
+
+            # Click badge by target index
+            click_result = driver.execute_script(f"""
+                var targetIdx = {item_index};
+                var xpath = "//*[normalize-space(text())='접수중']";
+                var elements = document.evaluate(xpath, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                
+                if (targetIdx >= elements.snapshotLength) return 'INDEX_OUT_OF_BOUNDS';
+                
+                var badge = elements.snapshotItem(targetIdx);
+                var row = badge.closest('tr, li');
+                
+                if (!row) {{
+                    row = badge.parentElement;
+                    while (row && row.tagName !== 'BODY') {{
+                        if (row.querySelectorAll('a').length > 0) break;
+                        row = row.parentElement;
+                    }}
+                }}
+                
+                if (row) {{
+                    var links = row.querySelectorAll('a');
+                    for (var j = 0; j < links.length; j++) {{
+                        if (links[j].innerText.trim().length > 10) {{
+                            links[j].click();
+                            return 'CLICKED_A_TAG';
+                        }}
+                    }}
+                    if (row.hasAttribute('onclick')) {{
+                        row.click();
+                        return 'CLICKED_ROW_ITSELF';
+                    }}
+                }}
+                return 'FOUND_BADGE_BUT_NO_CLICKABLE_LINK';
+            """)
+
+            print(f"[*] JS Click Result for Index {item_index}: {click_result}")
+
+            if click_result in ['CLICKED_A_TAG', 'CLICKED_ROW_ITSELF']:
+                time.sleep(4) 
+                
+                # Switch to new tab if opened
+                if len(driver.window_handles) > 1:
+                    for window_handle in driver.window_handles:
+                        if window_handle != original_window:
+                            driver.switch_to.window(window_handle)
+                            break
+                
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                )
+                time.sleep(2) 
+                
+                scrape_iris_opportunity(driver, BASE_DOWNLOAD_DIR)
+            else:
+                print(f"[!] Could not trigger click for badge index {item_index}")
 
     except Exception as e:
-        print("[!] Could not interact with the dashboard.")
-        print(f"Error details: {e}")
+        print(f"[!] Critical Error: {e}")
         
     finally:
         print("[*] Closing browser...")
