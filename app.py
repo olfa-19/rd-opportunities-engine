@@ -8,7 +8,7 @@ st.title("🤖 Unified R&D Opportunities & Procurement Feed")
 
 PROJECT_ROOT = os.getcwd()
 # Added "NTIS" to the scraper folders array so the dashboard picks it up
-SCRAPER_FOLDERS = ["나라장터", "IRIS", "기업마당", "NTIS", "K-Startup"]
+SCRAPER_FOLDERS = ["나라장터", "IRIS", "기업마당", "NTIS", "K-Startup", "IITP"]
 
 def extract_attachment_names(data):
     """Extract attachment names from metadata."""
