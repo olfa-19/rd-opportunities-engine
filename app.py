@@ -2,10 +2,11 @@ import os
 import json
 import pandas as pd
 import streamlit as st
+import datetime
 
 # --- Team Bridge Styling & Config ---
 st.set_page_config(page_title="Team Bridge - R&D Feed", layout="wide", page_icon="🌉")
-st.title("🤖 R&D & Procurement Engine")
+st.title("🌉 Team Bridge: R&D & Procurement Engine")
 st.markdown("Unified dashboard for tracking and managing localized R&D opportunities.")
 st.markdown("---")
 
@@ -25,8 +26,8 @@ def extract_attachment_names(data):
                 file_list.append(item)
     return file_list
 
-def normalize_metadata(source_name, folder_path, data):
-    """Normalize metadata fields and track actual folder paths."""
+def normalize_metadata(source_name, folder_path, data, meta_path):
+    """Normalize metadata fields and use scraped date for all records."""
     folder_name = os.path.basename(folder_path)
     opp_id = data.get("bid_id") or data.get("공고번호") or folder_name
     title = data.get("title") or data.get("공고명 (Title)") or data.get("공고명") or folder_name
@@ -38,17 +39,20 @@ def normalize_metadata(source_name, folder_path, data):
         data.get("발주기관") or 
         "N/A"
     )
-    date = data.get("posting_date") or data.get("공고기간") or data.get("접수기간") or data.get("등록일") or "N/A"
+    
+    # --- ALL DATES SET TO SCRAPED DATE ---
+    file_timestamp = os.path.getmtime(meta_path)
+    date = datetime.datetime.fromtimestamp(file_timestamp).strftime('%Y-%m-%d')
     
     file_names = extract_attachment_names(data)
-    
-    # Updated Description: General clean info per your requirements
     files_str = ", ".join(file_names) if file_names else "No downloadable files"
+    
     desc = (
         f"**Source Platform:** {source_name}\n\n"
         f"**Opportunity ID:** {opp_id}\n\n"
         f"**Project Name:** {title}\n\n"
         f"**Organization:** {organization}\n\n"
+        f"**Scraped On:** {date}\n\n"
         f"**Available Files:** {files_str}"
     )
 
@@ -77,7 +81,7 @@ for source_folder in SCRAPER_FOLDERS:
                 try:
                     with open(meta_path, "r", encoding="utf-8") as f:
                         json_content = json.load(f)
-                        parsed = normalize_metadata(source_folder, root, json_content)
+                        parsed = normalize_metadata(source_folder, root, json_content, meta_path)
                         records.append(parsed)
                 except Exception as e:
                     st.sidebar.warning(f"Error loading {meta_path}: {e}")
@@ -86,7 +90,6 @@ df = pd.DataFrame(records)
 
 # --- Dashboard Layout ---
 if not df.empty:
-    # Cleaner Metric display
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Opportunities", len(df))
     col2.metric("Total Attachments", df["Files"].sum())
@@ -117,7 +120,6 @@ if not df.empty:
         ]
 
     st.subheader("📋 Scraped Opportunities Feed")
-    # URL removed from the rendered dataframe
     st.dataframe(
         filtered_df[["Source", "Date", "ID", "Title", "Organization", "Files", "File List"]],
         column_config={
@@ -139,8 +141,6 @@ if not df.empty:
             selected_row = filtered_df[filtered_df["display_label"] == selected_label].iloc[0]
             
             st.markdown(f"### {selected_row['Title']}")
-            
-            # Show the new standardized description
             st.info(selected_row["Description"])
             
             # --- FILE DOWNLOAD SECTION ---
