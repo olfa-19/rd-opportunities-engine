@@ -27,7 +27,7 @@ def extract_attachment_names(data):
     return file_list
 
 def normalize_metadata(source_name, folder_path, data, meta_path):
-    """Normalize metadata fields and use scraped date for all records."""
+    """Normalize metadata fields, prioritizing JSON date fields before file timestamps."""
     folder_name = os.path.basename(folder_path)
     opp_id = data.get("bid_id") or data.get("공고번호") or folder_name
     title = data.get("title") or data.get("공고명 (Title)") or data.get("공고명") or folder_name
@@ -40,9 +40,22 @@ def normalize_metadata(source_name, folder_path, data, meta_path):
         "N/A"
     )
     
-    # --- ALL DATES SET TO SCRAPED DATE ---
-    file_timestamp = os.path.getmtime(meta_path)
-    date = datetime.datetime.fromtimestamp(file_timestamp).strftime('%Y-%m-%d')
+    # 1. Look for explicit date keys inside metadata.json
+    raw_date = (
+        data.get("scraped_at") or 
+        data.get("collected_at") or 
+        data.get("posting_date") or 
+        data.get("공고기간") or 
+        data.get("접수기간") or 
+        data.get("등록일")
+    )
+    
+    # 2. Fallback to file timestamp if no date is found in JSON
+    if raw_date and str(raw_date).strip():
+        date = str(raw_date).strip()
+    else:
+        file_timestamp = os.path.getmtime(meta_path)
+        date = datetime.datetime.fromtimestamp(file_timestamp).strftime('%Y-%m-%d')
     
     file_names = extract_attachment_names(data)
     files_str = ", ".join(file_names) if file_names else "No downloadable files"
@@ -52,7 +65,7 @@ def normalize_metadata(source_name, folder_path, data, meta_path):
         f"**Opportunity ID:** {opp_id}\n\n"
         f"**Project Name:** {title}\n\n"
         f"**Organization:** {organization}\n\n"
-        f"**Scraped On:** {date}\n\n"
+        f"**Date:** {date}\n\n"
         f"**Available Files:** {files_str}"
     )
 
