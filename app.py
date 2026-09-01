@@ -7,7 +7,7 @@ import streamlit as st
 
 # --- Team Bridge Styling & Config ---
 st.set_page_config(page_title="Team Bridge - R&D Feed", layout="wide", page_icon="🌉")
-st.title("🌉 Team Bridge: R&D & Procurement Engine")
+st.title("🤖 R&D & Procurement Engine")
 st.markdown("Unified dashboard for tracking and managing localized R&D opportunities.")
 st.markdown("---")
 
