@@ -1,8 +1,9 @@
 import os
 import json
+import re
+import datetime
 import pandas as pd
 import streamlit as st
-import datetime
 
 # --- Team Bridge Styling & Config ---
 st.set_page_config(page_title="Team Bridge - R&D Feed", layout="wide", page_icon="🌉")
@@ -27,7 +28,7 @@ def extract_attachment_names(data):
     return file_list
 
 def normalize_metadata(source_name, folder_path, data, meta_path):
-    """Normalize metadata fields, prioritizing JSON date fields before file timestamps."""
+    """Normalize metadata fields with strict regex validation for dates."""
     folder_name = os.path.basename(folder_path)
     opp_id = data.get("bid_id") or data.get("공고번호") or folder_name
     title = data.get("title") or data.get("공고명 (Title)") or data.get("공고명") or folder_name
@@ -40,20 +41,25 @@ def normalize_metadata(source_name, folder_path, data, meta_path):
         "N/A"
     )
     
-    # 1. Look for explicit date keys inside metadata.json
-    raw_date = (
+    # 1. Grab raw date candidates from JSON
+    raw_date = str(
         data.get("scraped_at") or 
         data.get("collected_at") or 
         data.get("posting_date") or 
         data.get("공고기간") or 
         data.get("접수기간") or 
-        data.get("등록일")
-    )
+        data.get("등록일") or 
+        ""
+    ).strip()
     
-    # 2. Fallback to file timestamp if no date is found in JSON
-    if raw_date and str(raw_date).strip():
-        date = str(raw_date).strip()
+    # 2. Strict Regex Check: Must match YYYY-MM-DD, YYYY.MM.DD, or YYYY/MM/DD
+    date_match = re.search(r'20\d{2}[-\./]\d{1,2}[-\./]\d{1,2}', raw_date)
+    
+    if date_match:
+        # Standardize delimiter to YYYY-MM-DD
+        date = date_match.group(0).replace('.', '-').replace('/', '-')
     else:
+        # Reject view counts (e.g. 1084) and fall back to file timestamp
         file_timestamp = os.path.getmtime(meta_path)
         date = datetime.datetime.fromtimestamp(file_timestamp).strftime('%Y-%m-%d')
     
