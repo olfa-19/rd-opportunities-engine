@@ -2,3 +2,8 @@ __pycache__/
 .DS_Store
 *.crdownload
 *.tmp
+# Ignore downloaded scraped files
+*.zip
+*.pdf
+*.hwp
+*.hwpx
